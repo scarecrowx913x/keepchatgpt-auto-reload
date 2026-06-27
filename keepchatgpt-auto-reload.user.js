@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KeepChatGPT Auto Reload on Chat Switch
 // @namespace    https://github.com/scarecrowx913x/keepchatgpt-auto-reload
-// @version      0.7
+// @version      0.8
 // @description  ChatGPTでトーク切替後にKeepChatGPTが消える場合、自動で1回だけ再読み込みする
 // @homepageURL  https://github.com/scarecrowx913x/keepchatgpt-auto-reload
 // @supportURL   https://github.com/scarecrowx913x/keepchatgpt-auto-reload/issues
@@ -19,12 +19,16 @@
   const RELOAD_KEY_PREFIX = 'kcg_auto_reload_done:';
   const CHECK_INTERVAL_MS = 500;
   const CHECK_TIMEOUT_MS = 7000;
+  const USER_IDLE_RELOAD_DELAY_MS = 30000;
   const URL_CHANGE_EVENT = 'kcg-auto-reload:url-change';
   const HOOKED_KEY = '__kcgAutoReloadHooked';
 
   let lastUrl = location.href;
   let checkTimer = null;
   let mutationTimer = null;
+  let reloadDeferTimer = null;
+  let lastUserEditAt = 0;
+  let isComposing = false;
 
   function log(...args) {
     console.log('[KCG Auto Reload]', ...args);
@@ -93,6 +97,152 @@
     }
   }
 
+  function clearReloadDeferTimer() {
+    if (reloadDeferTimer) {
+      clearTimeout(reloadDeferTimer);
+      reloadDeferTimer = null;
+    }
+  }
+
+  function closestEditableElement(element) {
+    if (!(element instanceof Element)) {
+      return null;
+    }
+
+    return element.closest(
+      [
+        'textarea',
+        'input',
+        '[contenteditable]',
+        '[role="textbox"]'
+      ].join(',')
+    );
+  }
+
+  function isTextInputElement(element) {
+    if (!(element instanceof HTMLInputElement)) {
+      return false;
+    }
+
+    const type = (element.getAttribute('type') || 'text').toLowerCase();
+
+    return [
+      'email',
+      'number',
+      'password',
+      'search',
+      'tel',
+      'text',
+      'url'
+    ].includes(type);
+  }
+
+  function isEditableElement(element) {
+    if (!element) {
+      return false;
+    }
+
+    return (
+      element instanceof HTMLTextAreaElement ||
+      isTextInputElement(element) ||
+      element.isContentEditable ||
+      element.getAttribute?.('role') === 'textbox'
+    );
+  }
+
+  function editableText(element) {
+    if (element instanceof HTMLTextAreaElement || isTextInputElement(element)) {
+      return element.value;
+    }
+
+    return element?.textContent || '';
+  }
+
+  function isVisibleElement(element) {
+    if (!(element instanceof Element)) {
+      return false;
+    }
+
+    const style = window.getComputedStyle(element);
+
+    return (
+      style.display !== 'none' &&
+      style.visibility !== 'hidden' &&
+      element.getClientRects().length > 0
+    );
+  }
+
+  function hasDraftText() {
+    const activeEditable = closestEditableElement(document.activeElement);
+
+    if (isEditableElement(activeEditable) && editableText(activeEditable).trim()) {
+      return true;
+    }
+
+    return Array.from(
+      document.querySelectorAll(
+        [
+          'textarea',
+          'input[type="text"]',
+          'input[type="search"]',
+          '[contenteditable]',
+          '[role="textbox"]'
+        ].join(',')
+      )
+    ).some(
+      element =>
+        isVisibleElement(element) &&
+        isEditableElement(element) &&
+        editableText(element).trim()
+    );
+  }
+
+  function isUserEditing() {
+    return Boolean(closestEditableElement(document.activeElement));
+  }
+
+  function recordUserEdit(event) {
+    if (closestEditableElement(event.target)) {
+      lastUserEditAt = Date.now();
+    }
+  }
+
+  function shouldProtectUserInput() {
+    if (isComposing) {
+      return 'ime composition active';
+    }
+
+    if (hasDraftText()) {
+      return 'draft text exists';
+    }
+
+    if (isUserEditing() && Date.now() - lastUserEditAt < USER_IDLE_RELOAD_DELAY_MS) {
+      return 'recent edit activity';
+    }
+
+    return '';
+  }
+
+  function safeReload(reason, key) {
+    const protectReason = shouldProtectUserInput();
+
+    if (!protectReason) {
+      clearReloadDeferTimer();
+      markReloaded(key);
+      log('KeepChatGPT UI missing after wait. reload now.', reason);
+      location.reload();
+      return;
+    }
+
+    log('Skip reload while user input is protected.', protectReason, reason);
+
+    clearReloadDeferTimer();
+    reloadDeferTimer = setTimeout(() => {
+      reloadDeferTimer = null;
+      scheduleCheck('deferred after user input');
+    }, USER_IDLE_RELOAD_DELAY_MS);
+  }
+
   function scheduleCheck(reason) {
     clearCheckTimer();
 
@@ -110,6 +260,7 @@
 
       if (hasKeepChatGPTUi()) {
         checkTimer = null;
+        clearReloadDeferTimer();
         log('KeepChatGPT UI found. no reload.', reason);
         return;
       }
@@ -129,10 +280,8 @@
         return;
       }
 
-      markReloaded(key);
       checkTimer = null;
-      log('KeepChatGPT UI missing after wait. reload now.', reason);
-      location.reload();
+      safeReload(reason, key);
     }
 
     checkTimer = setTimeout(checkLoop, CHECK_INTERVAL_MS);
@@ -146,6 +295,7 @@
     }
 
     lastUrl = currentUrl;
+    clearReloadDeferTimer();
     log('URL changed:', reason, currentUrl);
     scheduleCheck(reason);
   }
@@ -195,6 +345,31 @@
   });
 
   hookHistory();
+
+  document.addEventListener('input', recordUserEdit, true);
+  document.addEventListener('keydown', recordUserEdit, true);
+  document.addEventListener('paste', recordUserEdit, true);
+  document.addEventListener('focusin', recordUserEdit, true);
+  document.addEventListener(
+    'compositionstart',
+    event => {
+      if (closestEditableElement(event.target)) {
+        isComposing = true;
+        recordUserEdit(event);
+      }
+    },
+    true
+  );
+  document.addEventListener(
+    'compositionend',
+    event => {
+      if (closestEditableElement(event.target)) {
+        isComposing = false;
+        recordUserEdit(event);
+      }
+    },
+    true
+  );
 
   const observer = new MutationObserver(() => {
     clearTimeout(mutationTimer);

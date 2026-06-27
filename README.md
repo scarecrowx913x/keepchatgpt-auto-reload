@@ -33,6 +33,7 @@ https://raw.githubusercontent.com/scarecrowx913x/keepchatgpt-auto-reload/main/ke
 - ChatGPTのトーク切り替えを検知
 - KeepChatGPTのUIが見つからない場合だけ再読み込み
 - 同じチャットページでは1回だけ再読み込み
+- 入力中、下書きあり、IME変換中は再読み込みを延期
 - `pushState` / `replaceState` / `popstate` / DOM変化を監視
 - `/c/`、`/g/`、`/project/`、`/projects/`配下で動作
 - KeepChatGPTが正常に表示されている場合は何もしない
@@ -42,6 +43,8 @@ https://raw.githubusercontent.com/scarecrowx913x/keepchatgpt-auto-reload/main/ke
 1. Userscriptをインストール
 2. ChatGPTで通常どおり会話やトーク切り替えを行う
 3. KeepChatGPTのUIが消えた場合、数秒待ってから自動で再読み込み
+
+入力欄にフォーカスがあり、入力内容がある場合やIME変換中の場合は、自動再読み込みを行いません。入力カーソル位置や下書きを壊さないことを優先します。
 
 ## 自動更新
 
@@ -71,6 +74,11 @@ https://raw.githubusercontent.com/scarecrowx913x/keepchatgpt-auto-reload/main/ke
 
 - KeepChatGPT側のDOM名や目印が変わった可能性があります。
 - `hasKeepChatGPTUi()`の検出条件を調整してください。
+
+**入力中に再読み込みされない**
+
+- 入力内容やIME変換中の状態を保護するための仕様です。
+- 入力を消すか、入力欄からフォーカスを外すと再判定されます。
 
 ## 開発
 
