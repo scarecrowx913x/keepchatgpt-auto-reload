@@ -3,6 +3,11 @@
 // @namespace    https://github.com/scarecrowx913x/keepchatgpt-auto-reload
 // @version      0.7
 // @description  ChatGPTでトーク切替後にKeepChatGPTが消える場合、自動で1回だけ再読み込みする
+// @homepageURL  https://github.com/scarecrowx913x/keepchatgpt-auto-reload
+// @supportURL   https://github.com/scarecrowx913x/keepchatgpt-auto-reload/issues
+// @updateURL    https://raw.githubusercontent.com/scarecrowx913x/keepchatgpt-auto-reload/main/keepchatgpt-auto-reload.user.js
+// @downloadURL  https://raw.githubusercontent.com/scarecrowx913x/keepchatgpt-auto-reload/main/keepchatgpt-auto-reload.user.js
+// @license      MIT
 // @match        https://chatgpt.com/*
 // @grant        none
 // @run-at       document-idle
