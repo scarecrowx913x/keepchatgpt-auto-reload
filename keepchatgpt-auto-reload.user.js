@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KeepChatGPT Auto Reload on Chat Switch
 // @namespace    https://github.com/scarecrowx913x/keepchatgpt-auto-reload
-// @version      0.8
+// @version      0.9
 // @description  ChatGPTでトーク切替後にKeepChatGPTが消える場合、自動で1回だけ再読み込みする
 // @homepageURL  https://github.com/scarecrowx913x/keepchatgpt-auto-reload
 // @supportURL   https://github.com/scarecrowx913x/keepchatgpt-auto-reload/issues
@@ -22,6 +22,23 @@
   const USER_IDLE_RELOAD_DELAY_MS = 30000;
   const URL_CHANGE_EVENT = 'kcg-auto-reload:url-change';
   const HOOKED_KEY = '__kcgAutoReloadHooked';
+  const EDITABLE_SELECTOR = [
+    '#prompt-textarea',
+    'textarea',
+    'input:not([type])',
+    'input[type="email"]',
+    'input[type="number"]',
+    'input[type="password"]',
+    'input[type="search"]',
+    'input[type="tel"]',
+    'input[type="text"]',
+    'input[type="url"]',
+    '[contenteditable]',
+    '[role="textbox"]',
+    '[data-lexical-editor="true"]',
+    '[data-testid="composer-text-input"]'
+  ].join(',');
+  const DRAFT_SELECTOR = EDITABLE_SELECTOR;
 
   let lastUrl = location.href;
   let checkTimer = null;
@@ -104,19 +121,34 @@
     }
   }
 
+  function elementFromNode(node) {
+    if (node instanceof Element) {
+      return node;
+    }
+
+    return node?.parentElement || null;
+  }
+
   function closestEditableElement(element) {
     if (!(element instanceof Element)) {
       return null;
     }
 
-    return element.closest(
-      [
-        'textarea',
-        'input',
-        '[contenteditable]',
-        '[role="textbox"]'
-      ].join(',')
-    );
+    return element.closest(EDITABLE_SELECTOR);
+  }
+
+  function closestEditableFromEvent(event) {
+    const path = event.composedPath?.() || [];
+
+    for (const item of path) {
+      const editable = closestEditableElement(elementFromNode(item));
+
+      if (editable) {
+        return editable;
+      }
+    }
+
+    return closestEditableElement(elementFromNode(event.target));
   }
 
   function isTextInputElement(element) {
@@ -145,6 +177,7 @@
     return (
       element instanceof HTMLTextAreaElement ||
       isTextInputElement(element) ||
+      element.matches?.(EDITABLE_SELECTOR) ||
       element.isContentEditable ||
       element.getAttribute?.('role') === 'textbox'
     );
@@ -173,23 +206,14 @@
   }
 
   function hasDraftText() {
-    const activeEditable = closestEditableElement(document.activeElement);
+    const activeEditable =
+      closestEditableElement(document.activeElement) || selectionEditableElement();
 
     if (isEditableElement(activeEditable) && editableText(activeEditable).trim()) {
       return true;
     }
 
-    return Array.from(
-      document.querySelectorAll(
-        [
-          'textarea',
-          'input[type="text"]',
-          'input[type="search"]',
-          '[contenteditable]',
-          '[role="textbox"]'
-        ].join(',')
-      )
-    ).some(
+    return Array.from(document.querySelectorAll(DRAFT_SELECTOR)).some(
       element =>
         isVisibleElement(element) &&
         isEditableElement(element) &&
@@ -197,12 +221,21 @@
     );
   }
 
-  function isUserEditing() {
-    return Boolean(closestEditableElement(document.activeElement));
+  function selectionEditableElement() {
+    const selection = document.getSelection?.();
+
+    if (!selection) {
+      return null;
+    }
+
+    return (
+      closestEditableElement(elementFromNode(selection.anchorNode)) ||
+      closestEditableElement(elementFromNode(selection.focusNode))
+    );
   }
 
   function recordUserEdit(event) {
-    if (closestEditableElement(event.target)) {
+    if (closestEditableFromEvent(event) || selectionEditableElement()) {
       lastUserEditAt = Date.now();
     }
   }
@@ -212,15 +245,27 @@
       return 'ime composition active';
     }
 
+    if (Date.now() - lastUserEditAt < USER_IDLE_RELOAD_DELAY_MS) {
+      return 'recent edit activity';
+    }
+
     if (hasDraftText()) {
       return 'draft text exists';
     }
 
-    if (isUserEditing() && Date.now() - lastUserEditAt < USER_IDLE_RELOAD_DELAY_MS) {
-      return 'recent edit activity';
-    }
-
     return '';
+  }
+
+  function deferCheckUntilUserIdle(reason, protectReason) {
+    clearCheckTimer();
+    clearReloadDeferTimer();
+
+    log('Defer KeepChatGPT check while user input is protected.', protectReason, reason);
+
+    reloadDeferTimer = setTimeout(() => {
+      reloadDeferTimer = null;
+      scheduleCheck('deferred after user input');
+    }, USER_IDLE_RELOAD_DELAY_MS);
   }
 
   function safeReload(reason, key) {
@@ -234,13 +279,7 @@
       return;
     }
 
-    log('Skip reload while user input is protected.', protectReason, reason);
-
-    clearReloadDeferTimer();
-    reloadDeferTimer = setTimeout(() => {
-      reloadDeferTimer = null;
-      scheduleCheck('deferred after user input');
-    }, USER_IDLE_RELOAD_DELAY_MS);
+    deferCheckUntilUserIdle(reason, protectReason);
   }
 
   function scheduleCheck(reason) {
@@ -250,11 +289,25 @@
       return;
     }
 
+    const initialProtectReason = shouldProtectUserInput();
+
+    if (initialProtectReason) {
+      deferCheckUntilUserIdle(reason, initialProtectReason);
+      return;
+    }
+
     const startedAt = Date.now();
 
     function checkLoop() {
       if (!isChatPage()) {
         checkTimer = null;
+        return;
+      }
+
+      const protectReason = shouldProtectUserInput();
+
+      if (protectReason) {
+        deferCheckUntilUserIdle(reason, protectReason);
         return;
       }
 
@@ -346,6 +399,7 @@
 
   hookHistory();
 
+  document.addEventListener('beforeinput', recordUserEdit, true);
   document.addEventListener('input', recordUserEdit, true);
   document.addEventListener('keydown', recordUserEdit, true);
   document.addEventListener('paste', recordUserEdit, true);
@@ -353,17 +407,18 @@
   document.addEventListener(
     'compositionstart',
     event => {
-      if (closestEditableElement(event.target)) {
+      if (closestEditableFromEvent(event)) {
         isComposing = true;
         recordUserEdit(event);
       }
     },
     true
   );
+  document.addEventListener('compositionupdate', recordUserEdit, true);
   document.addEventListener(
     'compositionend',
     event => {
-      if (closestEditableElement(event.target)) {
+      if (closestEditableFromEvent(event)) {
         isComposing = false;
         recordUserEdit(event);
       }
@@ -371,7 +426,15 @@
     true
   );
 
-  const observer = new MutationObserver(() => {
+  function isEditableMutation(mutation) {
+    return Boolean(closestEditableElement(elementFromNode(mutation.target)));
+  }
+
+  const observer = new MutationObserver(mutations => {
+    if (mutations.every(isEditableMutation)) {
+      return;
+    }
+
     clearTimeout(mutationTimer);
 
     mutationTimer = setTimeout(() => {
